@@ -356,8 +356,7 @@ mod tests {
     use once_cell::sync::Lazy;
     use std::sync::Mutex;
 
-    const IDENTITY: &'static CStr =
-        unsafe { CStr::from_bytes_with_nul_unchecked(b"example-program\0") };
+    const IDENTITY: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"example-program\0") };
     const OPTIONS: Options = Options(0);
     const FACILITY: Facility = Facility::User;
 
