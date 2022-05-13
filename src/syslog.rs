@@ -353,14 +353,38 @@ impl Drop for SyslogWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
 
     const IDENTITY: &'static CStr =
         unsafe { CStr::from_bytes_with_nul_unchecked(b"example-program\0") };
     const OPTIONS: Options = Options(0);
     const FACILITY: Facility = Facility::User;
 
+    static INITIALIZED: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn capture_stderr(f: impl FnOnce()) -> String {
+        use std::io::Read;
+        let mut buf = gag::BufferRedirect::stderr().unwrap();
+        f();
+        let mut output = String::new();
+        buf.read_to_string(&mut output).unwrap();
+        output
+    }
+
+    fn with_initialized(f: impl FnOnce()) -> Vec<String> {
+        let _lock = INITIALIZED.lock();
+        let syslog = Syslog::new(IDENTITY, OPTIONS | Options::LOG_PERROR, FACILITY).unwrap();
+        let subscriber = tracing_subscriber::fmt().with_writer(syslog).finish();
+        tracing::subscriber::with_default(subscriber, || capture_stderr(f))
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
     #[test]
     fn double_init() {
+        let _lock = INITIALIZED.lock();
         let _syslog = Syslog::new(IDENTITY, OPTIONS, FACILITY).unwrap();
         assert!(
             Syslog::new(IDENTITY, OPTIONS, FACILITY).is_none(),
@@ -370,8 +394,18 @@ mod tests {
 
     #[test]
     fn init_after_drop() {
+        let _lock = INITIALIZED.lock();
         let syslog = Syslog::new(IDENTITY, OPTIONS, FACILITY).unwrap();
         drop(syslog);
         Syslog::new(IDENTITY, OPTIONS, FACILITY).unwrap();
+    }
+
+    #[test]
+    fn basic_log() {
+        let text = "test message";
+        match with_initialized(|| tracing::info!("{}", text)).as_slice() {
+            [msg] if msg.contains(text) => (),
+            x => panic!("expected log message containing '{}', got '{:?}'", text, x),
+        }
     }
 }
