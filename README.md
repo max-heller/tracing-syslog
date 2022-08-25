@@ -1,4 +1,4 @@
-# tracing-syslog
+# syslog-tracing
 
 Support for logging [`tracing`](https://crates.io/crates/tracing) events to
 syslog through

@@ -6,7 +6,7 @@ use tracing_subscriber::fmt::MakeWriter;
 ///
 /// # Examples
 /// ```
-/// use tracing_syslog::Options;
+/// use syslog_tracing::Options;
 /// // Log PID with messages and log to stderr as well as `syslog`.
 /// let opts = Options::LOG_PID | Options::LOG_PERROR;
 /// ```
@@ -194,7 +194,7 @@ fn syslog(priority: Priority, msg: &CStr) {
 /// ```
 /// let identity = std::ffi::CStr::from_bytes_with_nul(b"example-program\0").unwrap();
 /// let (options, facility) = Default::default();
-/// let syslog = tracing_syslog::Syslog::new(identity, options, facility).unwrap();
+/// let syslog = syslog_tracing::Syslog::new(identity, options, facility).unwrap();
 /// tracing_subscriber::fmt().with_writer(syslog).init();
 /// ```
 pub struct Syslog {
@@ -225,7 +225,7 @@ impl Syslog {
     /// the default `syslog` options and facility:
     ///
     /// ```
-    /// use tracing_syslog::Syslog;
+    /// use syslog_tracing::Syslog;
     /// let identity = std::ffi::CStr::from_bytes_with_nul(b"example-program\0").unwrap();
     /// let (options, facility) = Default::default();
     /// let syslog = Syslog::new(identity, options, facility).unwrap();
@@ -234,7 +234,7 @@ impl Syslog {
     /// Two loggers cannot coexist, since [`libc::syslog()`] writes to a global logger:
     ///
     /// ```
-    /// # use tracing_syslog::Syslog;
+    /// # use syslog_tracing::Syslog;
     /// # let identity = std::ffi::CStr::from_bytes_with_nul(b"example-program\0").unwrap();
     /// # let (options, facility) = Default::default();
     /// let syslog = Syslog::new(identity, options, facility).unwrap();
