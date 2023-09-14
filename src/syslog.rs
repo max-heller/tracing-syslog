@@ -289,7 +289,6 @@ impl<'a> MakeWriter<'a> for Syslog {
 
 /// [Writer](io::Write) to `syslog` produced by [`MakeWriter`].
 pub struct SyslogWriter {
-    flushed: bool,
     facility: Facility,
     level: Level,
 }
@@ -297,7 +296,6 @@ pub struct SyslogWriter {
 impl SyslogWriter {
     fn new(facility: Facility, level: Level) -> Self {
         SyslogWriter {
-            flushed: false,
             facility,
             level,
         }
@@ -336,7 +334,6 @@ impl io::Write for SyslogWriter {
             // Clear buffer
             buf.clear();
 
-            self.flushed = true;
             Ok(())
         })
     }
@@ -344,9 +341,7 @@ impl io::Write for SyslogWriter {
 
 impl Drop for SyslogWriter {
     fn drop(&mut self) {
-        if !self.flushed {
-            let _ = io::Write::flush(self);
-        }
+        drop(self.flush());
     }
 }
 
