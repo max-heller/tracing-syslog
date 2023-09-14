@@ -306,42 +306,45 @@ thread_local! { static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(2
 
 impl io::Write for SyslogWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        BUF.with(|buf| buf.borrow_mut().extend(bytes));
-        Ok(bytes.len())
+        // Check if the data is already a cstr
+        if let Ok(cstr) = CStr::from_bytes_with_nul(bytes) {
+            syslog(Priority::new(self.facility, self.level), cstr);
+            return Ok(bytes.len());
+        }
+
+        // If we got here, it means that there's an interior nul or it's not nul
+        // terminated
+
+        if bytes.last() == Some(&0x00) {
+            // We're nul terminated, which means that we must have had a
+            // interior nul.
+            //
+            // Interior nuls are never valid CStrs, so instead of truncating,
+            // fail instead.
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Data provided to syslog must be not have interior nuls"));
+        }
+
+        // We have a non-nul terminated string; Re-use the buffer to create a
+        // nul-terminated cstr
+        #[cfg(debug_assertions)]
+        assert!(bytes.iter().all(|b| *b != 0x00), "we should have non-null data here");
+        BUF.with(|buf| {
+            let mut buf = buf.borrow_mut();
+            buf.clear();
+            buf.extend_from_slice(bytes);
+            buf.push(0x00);
+
+            // SAFETY: We just added a nul terminator and asserted that the
+            // data has no interior nuls. We also cleared the buffer, so the
+            // only data in there is a interior-nul-free, nul-terminated slice.
+            let cstr = unsafe { CStr::from_bytes_with_nul_unchecked(&buf) };
+            syslog(Priority::new(self.facility, self.level), cstr);
+            Ok(bytes.len())
+        })
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        BUF.with(|buf| {
-            let mut buf = buf.borrow_mut();
-
-            // Append nul-terminator
-            buf.push(0);
-
-            // Send the message to `syslog` if the message is valid
-            match CStr::from_bytes_with_nul(&buf) {
-                Ok(msg) => syslog(Priority::new(self.facility, self.level), msg),
-                Err::<_, std::ffi::FromBytesWithNulError>(err) => {
-                    // Since we push a nul byte to `buf` above, it must be that `buf` contained an
-                    // interior nul byte. In debug mode, panic
-                    #[cfg(debug_assertions)]
-                    panic!("message to be logged contained interior nul byte: {}", err);
-                    // ... but in non-debug mode, just print an error
-                    #[cfg(not(debug_assertions))]
-                    eprintln!("message to be logged contained interior nul byte: {}", err);
-                }
-            }
-
-            // Clear buffer
-            buf.clear();
-
-            Ok(())
-        })
-    }
-}
-
-impl Drop for SyslogWriter {
-    fn drop(&mut self) {
-        drop(self.flush());
+        Ok(())
     }
 }
 
