@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2024-01-20
+
+### Added
+
+- `Syslog::invalid_chars()` to allow configuring behavior when a message to be logged contains
+  characters that are invalid in a C string (i.e., interior nul bytes) (#1)
+
+### Changed
+
+- If a log message contains characters that are invalid in a C string (i.e., interior nul bytes),
+  these characters are replaced with the Unicode replacement character (�) and the modified message
+  is logged to syslog. This is a change from the past default, which was to panic in debug mode and
+  log a message in release mode. (#1)
+
 ## [0.2.0] - 2023-05-07
 
 ### Changed
