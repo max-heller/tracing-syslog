@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, ffi::CStr, io, sync::atomic::AtomicBool};
+use std::{borrow::Cow, cell::RefCell, ffi::CStr, fmt, io, str, sync::atomic::AtomicBool};
 use tracing_core::{Level, Metadata};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -158,6 +158,25 @@ impl Priority {
     }
 }
 
+/// What to do when a log message contains characters that are invalid in C strings.
+#[derive(Copy, Clone)]
+pub enum InvalidCharAction {
+    /// Replace invalid characters with the provided character and try again
+    ReplaceWith(char),
+    /// Remove invalid characters and try again
+    Remove,
+    /// Print a warning to stderr and do not log to syslog
+    Warn,
+    /// Panic
+    Panic,
+}
+
+impl Default for InvalidCharAction {
+    fn default() -> Self {
+        Self::ReplaceWith(char::REPLACEMENT_CHARACTER)
+    }
+}
+
 fn syslog(priority: Priority, msg: &CStr) {
     // SAFETY: the second argument must be a valid pointer to a nul-terminated
     // format string and formatting placeholders e.g. %s must correspond to
@@ -203,6 +222,7 @@ pub struct Syslog {
     #[allow(dead_code)]
     identity: Cow<'static, CStr>,
     facility: Facility,
+    invalid_chars: InvalidCharAction,
 }
 
 impl Syslog {
@@ -255,9 +275,28 @@ impl Syslog {
             // are dropped, by which point `closelog` will have been called by the
             // `Drop` implementation.
             unsafe { libc::openlog(identity.as_ptr(), options.0, facility as libc::c_int) };
-            Some(Syslog { identity, facility })
+            Some(Syslog {
+                identity,
+                facility,
+                invalid_chars: Default::default(),
+            })
         } else {
             None
+        }
+    }
+
+    /// Set the action to take when a message cannot be logged as is because it contains invalid characters.
+    pub fn invalid_chars(mut self, cfg: InvalidCharAction) -> Self {
+        self.invalid_chars = cfg;
+        self
+    }
+
+    fn writer(&self, level: Level) -> SyslogWriter {
+        SyslogWriter {
+            flushed: false,
+            facility: self.facility,
+            level,
+            invalid_chars: self.invalid_chars,
         }
     }
 }
@@ -279,11 +318,11 @@ impl<'a> MakeWriter<'a> for Syslog {
     type Writer = SyslogWriter;
 
     fn make_writer(&'a self) -> Self::Writer {
-        SyslogWriter::new(self.facility, Level::INFO)
+        self.writer(Level::INFO)
     }
 
     fn make_writer_for(&'a self, meta: &Metadata<'_>) -> Self::Writer {
-        SyslogWriter::new(self.facility, *meta.level())
+        self.writer(*meta.level())
     }
 }
 
@@ -292,16 +331,7 @@ pub struct SyslogWriter {
     flushed: bool,
     facility: Facility,
     level: Level,
-}
-
-impl SyslogWriter {
-    fn new(facility: Facility, level: Level) -> Self {
-        SyslogWriter {
-            flushed: false,
-            facility,
-            level,
-        }
-    }
+    invalid_chars: InvalidCharAction,
 }
 
 thread_local! { static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(256)) }
@@ -319,17 +349,54 @@ impl io::Write for SyslogWriter {
             // Append nul-terminator
             buf.push(0);
 
+            let priority = Priority::new(self.facility, self.level);
+
             // Send the message to `syslog` if the message is valid
             match CStr::from_bytes_with_nul(&buf) {
-                Ok(msg) => syslog(Priority::new(self.facility, self.level), msg),
-                Err::<_, std::ffi::FromBytesWithNulError>(err) => {
+                Ok(msg) => syslog(priority, msg),
+                Err(_) => {
                     // Since we push a nul byte to `buf` above, it must be that `buf` contained an
-                    // interior nul byte. In debug mode, panic
-                    #[cfg(debug_assertions)]
-                    panic!("message to be logged contained interior nul byte: {}", err);
-                    // ... but in non-debug mode, just print an error
-                    #[cfg(not(debug_assertions))]
-                    eprintln!("message to be logged contained interior nul byte: {}", err);
+                    // interior nul byte
+                    match self.invalid_chars {
+                        InvalidCharAction::Remove => {
+                            buf.retain(|&c| c != 0);
+                            buf.push(0);
+                            let msg = CStr::from_bytes_with_nul(&buf).unwrap();
+                            syslog(priority, msg);
+                        }
+                        InvalidCharAction::ReplaceWith(c) => {
+                            let mut replacement_bytes = [0; 4];
+                            let replacement_bytes = c.encode_utf8(&mut replacement_bytes).as_bytes();
+                            let mut msg = vec![];
+                            for &c in &buf[..buf.len()-1] {
+                                match c {
+                                    0 => msg.extend_from_slice(replacement_bytes),
+                                    c => msg.push(c),
+                                }
+                            }
+                            msg.push(0);
+                            let msg = CStr::from_bytes_with_nul(&msg).unwrap();
+                            syslog(priority, msg);
+                        }
+                        InvalidCharAction::Warn => {
+                            let buf = buf.as_slice();
+                            let utf8 = str::from_utf8(buf);
+                            let debug: &dyn fmt::Debug = match utf8 {
+                                Ok(ref str) => str,
+                                Err(_) => &buf,
+                            };
+                            eprintln!("syslog-tracing: message to be logged contained interior nul byte: {debug:?}");
+                        }
+                        InvalidCharAction::Panic => {
+                            let buf = buf.as_slice();
+                            let utf8 = str::from_utf8(buf);
+                            let debug: &dyn fmt::Debug = match utf8 {
+                                Ok(ref str) => str,
+                                Err(_) => &buf,
+                            };
+                            panic!("syslog-tracing: message to be logged contained interior nul byte: {debug:?}");
+                        }
+                    }
                 }
             }
 
@@ -371,10 +438,12 @@ mod tests {
         output
     }
 
-    fn with_initialized(f: impl FnOnce()) -> Vec<String> {
+    fn with_initialized(configure: impl FnOnce(Syslog) -> Syslog, f: impl FnOnce()) -> Vec<String> {
         let _lock = INITIALIZED.lock();
         let syslog = Syslog::new(IDENTITY, OPTIONS | Options::LOG_PERROR, FACILITY).unwrap();
-        let subscriber = tracing_subscriber::fmt().with_writer(syslog).finish();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(configure(syslog))
+            .finish();
         tracing::subscriber::with_default(subscriber, || capture_stderr(f))
             .lines()
             .map(String::from)
@@ -402,9 +471,61 @@ mod tests {
     #[test]
     fn basic_log() {
         let text = "test message";
-        match with_initialized(|| tracing::info!("{}", text)).as_slice() {
+        match with_initialized(|syslog| syslog, || tracing::info!("{}", text)).as_slice() {
             [msg] if msg.contains(text) => (),
             x => panic!("expected log message containing '{}', got '{:?}'", text, x),
+        }
+    }
+
+    #[test]
+    #[should_panic = "interior nul byte"]
+    fn invalid_chars_panic() {
+        with_initialized(
+            |syslog| syslog.invalid_chars(InvalidCharAction::Panic),
+            || tracing::info!("before\0after"),
+        );
+    }
+
+    #[test]
+    fn invalid_chars_warn() {
+        match with_initialized(
+            |syslog| syslog.invalid_chars(InvalidCharAction::Warn),
+            || tracing::info!("before\0after"),
+        )
+        .as_slice()
+        {
+            [msg] => assert!(msg.contains("interior nul byte")),
+            x => panic!("unexpected output: {x:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_chars_remove() {
+        match with_initialized(
+            |syslog| syslog.invalid_chars(InvalidCharAction::Remove),
+            || tracing::info!("before\0after"),
+        )
+        .as_slice()
+        {
+            [msg] => assert!(msg.contains("beforeafter")),
+            x => panic!("unexpected output: {x:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_chars_replace() {
+        match with_initialized(
+            |syslog| {
+                syslog.invalid_chars(InvalidCharAction::ReplaceWith(char::REPLACEMENT_CHARACTER))
+            },
+            || tracing::info!("before\0after"),
+        )
+        .as_slice()
+        {
+            [msg] => {
+                assert!(msg.contains(&format!("before{}after", char::REPLACEMENT_CHARACTER)))
+            }
+            x => panic!("unexpected output: {x:?}"),
         }
     }
 }
