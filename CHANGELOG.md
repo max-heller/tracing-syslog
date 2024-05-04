@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2024-05-04
+
+### Fixed
+
+- Ensure data written after a call to `Write::flush()` is logged (#7)
+
 ## [0.3.0] - 2024-01-20
 
 ### Added
