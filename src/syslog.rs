@@ -339,6 +339,7 @@ thread_local! { static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(2
 impl io::Write for SyslogWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         BUF.with(|buf| buf.borrow_mut().extend(bytes));
+        self.flushed = false;
         Ok(bytes.len())
     }
 
@@ -475,6 +476,29 @@ mod tests {
             [msg] if msg.contains(text) => (),
             x => panic!("expected log message containing '{}', got '{:?}'", text, x),
         }
+    }
+
+    #[test]
+    fn write_after_flush() {
+        let _lock = INITIALIZED.lock();
+
+        let process = "example-program";
+        let text = "test message";
+
+        let msg = capture_stderr(|| {
+            use std::io::Write;
+
+            let syslog = Syslog::new(IDENTITY, OPTIONS | Options::LOG_PERROR, FACILITY).unwrap();
+            let mut writer = syslog.make_writer();
+
+            writer.write_all(text.as_bytes()).unwrap();
+            writer.flush().unwrap();
+
+            writer.write_all(text.as_bytes()).unwrap();
+            // writer dropped here -> flush()
+        });
+
+        assert_eq!(msg, format!("{process}: {text}\n{process}: {text}\n"))
     }
 
     #[test]
